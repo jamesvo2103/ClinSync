@@ -4,7 +4,7 @@ import { useAuthStore } from '../store/useAuthStore'
 
 const LoginPage = () => {
 
-    const {login} = useAuthStore()
+    const {login, authError, isAuthLoading} = useAuthStore()
 
     const [formData, setFormData] = useState({
         email: '',
@@ -18,9 +18,9 @@ const LoginPage = () => {
         })
     }
 
-    const handleSubmit = (e) => {
+    const handleSubmit = async (e) => {
         e.preventDefault()
-        login(formData)
+        await login(formData)
     }
 
     return (
@@ -28,6 +28,11 @@ const LoginPage = () => {
             <div className="card w-full max-w-4xl bg-base-100 shadow-2xl">
                 <div className="card-body p-12">
                     <h2 className="card-title justify-center text-5xl font-bold mb-12">Organization Login</h2>
+                    {authError && (
+                        <div role="alert" className="alert alert-error text-xl mb-6">
+                            <span>{authError}</span>
+                        </div>
+                    )}
                     <form onSubmit={handleSubmit} className="space-y-8">
                         <div className="form-control">
                             <label className="label">
@@ -56,7 +61,9 @@ const LoginPage = () => {
                             />
                         </div>
                         <div className="form-control mt-12">
-                            <button type="submit" className="btn btn-primary btn-lg text-xl py-8">Login</button>
+                            <button type="submit" disabled={isAuthLoading} className="btn btn-primary btn-lg text-xl py-8">
+                                {isAuthLoading ? 'Logging in...' : 'Login'}
+                            </button>
                         </div>
                     </form>
                     <p className="text-center mt-8 text-xl">

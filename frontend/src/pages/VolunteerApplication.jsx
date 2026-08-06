@@ -1,7 +1,39 @@
-import React, { useState, useEffect } from 'react'
+import React, { useState } from 'react'
 import { Upload, Check, X, FileText, Loader } from 'lucide-react'
 import { createWorker } from 'tesseract.js'
 import { axiosInstance } from '../lib/axios'
+
+// pdfjs is large and most visitors never upload a PDF, so load it on first use
+// instead of in the initial bundle. Vite bundles it locally rather than
+// fetching from a CDN, so parsing keeps working offline and under a strict CSP.
+let pdfjsPromise = null
+const loadPdfjs = () => {
+  if (!pdfjsPromise) {
+    pdfjsPromise = (async () => {
+      const pdfjs = await import('pdfjs-dist')
+      const worker = await import('pdfjs-dist/build/pdf.worker.mjs?url')
+      pdfjs.GlobalWorkerOptions.workerSrc = worker.default
+      return pdfjs
+    })()
+  }
+  return pdfjsPromise
+}
+
+// Turn an axios failure into something a volunteer can act on. The generic
+// fallbacks matter as much as the specific cases: an unexplained failure here
+// leaves someone unsure whether they applied.
+const readSubmitError = (error) => {
+  const status = error.response?.status
+  const detail = error.response?.data?.detail
+
+  if (!error.response) return 'Cannot reach the server. Check your connection and try again.'
+  if (status === 400 && typeof detail === 'string' && detail.includes('Email already exists')) {
+    return 'An application with that email address has already been submitted.'
+  }
+  if (status === 422) return 'Some details are missing or invalid. Please check the form and try again.'
+  if (status === 503) return detail || 'The service is busy right now. Please try again in a minute.'
+  return detail || 'Something went wrong submitting your application. Please try again.'
+}
 
 const VolunteerApplication = () => {
   const [formData, setFormData] = useState({
@@ -29,11 +61,11 @@ const VolunteerApplication = () => {
   const [processingProgress, setProcessingProgress] = useState(0)
   const [clicked, setClicked] = useState({});
 
-  // State for Pyodide instance
-  const [pyodide, setPyodide] = useState(null)
   const [matches, setMatches] = useState([])
   const [userId, setUserId] = useState(null)
   const [trials, setTrials] = useState({})
+  const [explanation, setExplanation] = useState('')
+  const [matchError, setMatchError] = useState(null)
 
   const fetchTrials = async (matchIds) => {
     const trialDetails = {}
@@ -49,95 +81,42 @@ const VolunteerApplication = () => {
   }
 
   const handleMatch = async (trialId) => {
-    if (!userId) {
-      console.error("User ID not available")
-      return
-    }
-    
+    if (!userId) return
+
     try {
-      const response = await axiosInstance.post('/matches', { trial_id: trialId, user_id: userId })
-      console.log(`Matched to trial ${trialId}:`, response.data)
-      alert(`Matched to trial ${trialId}!`)
-      setClicked({ ...clicked, [trialId]: true })
+      await axiosInstance.post('/matches', { trial_id: trialId, user_id: userId })
+      setClicked(prev => ({ ...prev, [trialId]: true }))
+      setMatchError(null)
     } catch (error) {
-      console.error('Error matching user to trial:', error)
+      // A 409 means the application already went through for this trial, so
+      // reflect it as applied rather than as a failure.
+      if (error.response?.status === 409) {
+        setClicked(prev => ({ ...prev, [trialId]: true }))
+        return
+      }
+      setMatchError(readSubmitError(error))
     }
   }
 
-  // Load Pyodide
-  useEffect(() => {
-    if (!window.pyodide) {
-      const script = document.createElement('script')
-      script.src = "https://cdn.jsdelivr.net/pyodide/v0.18.1/full/pyodide.js"
-      script.onload = async () => {
-        try {
-          const loadedPyodide = await window.loadPyodide({
-            indexURL: "https://cdn.jsdelivr.net/pyodide/v0.18.1/full/"
-          })
-          setPyodide(loadedPyodide)
-          console.log("Pyodide loaded successfully")
-        } catch (error) {
-          console.error('Failed to load Pyodide:', error)
-        }
-      }
-      document.body.appendChild(script)
-    }
-  }, [])
-
-  // Write file to Pyodide's virtual file system
-  const writeFileToPyodideFS = (file) => {
-    return new Promise((resolve, reject) => {
-      const reader = new FileReader()
-      reader.onload = async (e) => {
-        const data = new Uint8Array(e.target.result)
-        try {
-          pyodide.FS.writeFile(file.name, data)
-          resolve()
-        } catch (error) {
-          reject(error)
-        }
-      }
-      reader.onerror = () => reject(reader.error)
-      reader.readAsArrayBuffer(file)
-    })
-  }
-
-  // Use Pyodide and PyPDF2 to extract text from a PDF file
+  // Extract PDF text with pdfjs-dist, which is already a dependency.
+  // This previously downloaded the Pyodide CPython runtime from a CDN and
+  // pip-installed PyPDF2 in the browser to do the same job: tens of megabytes
+  // per visitor, a hard dependency on a third-party CDN, and it shipped the
+  // volunteer's filename into an interpolated Python string.
   const extractTextFromPDF = async (file) => {
-    if (!pyodide) {
-      console.error("Pyodide is not loaded yet")
-      return "Pyodide is not loaded yet. Please try again in a moment."
-    }
     try {
-      // Write the PDF file into Pyodide's file system
-      await writeFileToPyodideFS(file)
-
-      // Load micropip and install PyPDF2 if necessary
-      await pyodide.loadPackage(['micropip'])
-      await pyodide.runPythonAsync(`
-        import micropip
-        await micropip.install('PyPDF2')
-      `)
-
-      // Run Python code to extract text from the PDF
-      const result = await pyodide.runPythonAsync(`
-        import PyPDF2
-
-        def extract_text_from_pdf(pdf_path):
-            with open(pdf_path, "rb") as f:
-                reader = PyPDF2.PdfReader(f)
-                text = ""
-                for page in reader.pages:
-                    page_text = page.extract_text() or ""
-                    text += page_text
-            return text
-
-        extract_text_from_pdf("${file.name}")
-      `)
-      
-      return result
+      const { getDocument } = await loadPdfjs()
+      const data = new Uint8Array(await file.arrayBuffer())
+      const doc = await getDocument({ data }).promise
+      const pages = []
+      for (let pageNum = 1; pageNum <= doc.numPages; pageNum++) {
+        const page = await doc.getPage(pageNum)
+        const content = await page.getTextContent()
+        pages.push(content.items.map(item => item.str).join(' '))
+      }
+      await doc.destroy()
+      return pages.join('\n').trim()
     } catch (error) {
-      console.error("Error extracting text from PDF using Pyodide:", error)
       return `[Error extracting text from ${file.name}: ${error.message}]`
     }
   }
@@ -183,7 +162,9 @@ const VolunteerApplication = () => {
       })
     }
     
-    setFiles([...files, ...newFiles])
+    // Functional updates: `files` captured at render time goes stale when two
+    // uploads land close together, silently dropping the earlier batch.
+    setFiles(prev => [...prev, ...newFiles])
     setFormData(prev => ({
       ...prev,
       files: [...prev.files, ...newFiles.map(f => ({
@@ -205,12 +186,12 @@ const VolunteerApplication = () => {
   }
 
   const removeFile = (index) => {
-    const updatedFiles = [...files]
-    const removedFile = updatedFiles.splice(index, 1)[0]
-    setFiles(updatedFiles)
+    // Remove by position, not by name: filtering on name deleted every file
+    // sharing that name, and two scans called "scan.pdf" is entirely normal.
+    setFiles(prev => prev.filter((_, i) => i !== index))
     setFormData(prev => ({
       ...prev,
-      files: prev.files.filter(f => f.name !== removedFile.name)
+      files: prev.files.filter((_, i) => i !== index)
     }))
   }
 
@@ -226,24 +207,22 @@ const VolunteerApplication = () => {
     e.preventDefault()
     setUploadStatus({ isUploading: true, success: false, error: null })
     try {
-      console.log('Submitting application:', formData)
-      let inputData = { ...formData, files: formData.files.map(f =>  f.text) }
+      const inputData = { ...formData, files: formData.files.map(f => f.text) }
       const response = await axiosInstance.post('/users/', inputData)
-      console.log('User created:', response.data)
-      
-      setMatches(response.data.matches)
+
+      const matchIds = response.data.matches ?? []
+      setMatches(matchIds)
       setUserId(response.data.id)
-      
-      fetchTrials(response.data.matches) // Fetch trial details
+      setExplanation(response.data.explanation ?? '')
+      await fetchTrials(matchIds)
+
+      // Only now is the submission actually successful. This used to be set
+      // outside the try/catch, so a failed submission still showed the success
+      // banner and the volunteer believed they had applied.
+      setUploadStatus({ isUploading: false, success: true, error: null })
     } catch (error) {
-      console.error('Error submitting application:', error)
+      setUploadStatus({ isUploading: false, success: false, error: readSubmitError(error) })
     }
-    setUploadStatus({ 
-      isUploading: false, 
-      success: true, 
-      error: null 
-    })
-  
   }
 
   const getFileIcon = (fileType) => {
@@ -533,9 +512,31 @@ const VolunteerApplication = () => {
               </div>
             </form>
           </div>
+          {uploadStatus.success && matches.length === 0 && (
+            <div className="mt-8 p-6 bg-base-200 rounded-lg shadow-lg text-center">
+              <h2 className="text-2xl font-bold text-primary mb-2">No matching trials yet</h2>
+              <p className="text-gray-500">
+                Your information was submitted successfully, but no open trials match it right
+                now. A coordinator will be in touch if that changes.
+              </p>
+            </div>
+          )}
+
           {matches.length > 0 && (
   <div className="mt-8 p-6 bg-base-200 rounded-lg shadow-lg">
     <h2 className="text-2xl font-bold text-center text-primary mb-4">Matched Trials</h2>
+    {matchError && (
+      <div role="alert" className="alert alert-error mb-4">
+        <X className="stroke-current shrink-0 h-6 w-6" />
+        <span>{matchError}</span>
+      </div>
+    )}
+    {explanation && (
+      <div className="mb-6 p-4 bg-base-100 rounded-lg border border-base-300">
+        <h3 className="font-semibold mb-2">Why these trials?</h3>
+        <p className="text-sm text-gray-500 whitespace-pre-line">{explanation}</p>
+      </div>
+    )}
     <ul className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
       {matches.map((trialId) => (
         <li key={trialId} className="card bg-base-100 shadow-lg rounded-lg border border-gray-200 p-6">

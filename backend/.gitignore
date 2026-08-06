@@ -1,6 +1,8 @@
 venv
 .env
 __pycache__
-*.txt
+
+# Chroma vector store - derived data, rebuild with `python -m db.reset`
+chroma_db/
 *.bin
 *sqlite3

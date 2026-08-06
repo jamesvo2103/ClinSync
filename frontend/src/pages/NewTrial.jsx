@@ -133,15 +133,13 @@ const NewTrial = () => {
                 org_ID: authOrg.id
             };
 
-            // Call the API to create the trial
-            const response = await axiosInstance.post('/trials', trialData);
-            
-            console.log('Trial created:', response.data);
+            await axiosInstance.post('/trials', trialData);
             setSuccess(true);
-            
-            // Redirect to dashboard after success, with a slight delay to show success message
+
+            // The dashboard is rendered at "/" for a logged-in org; there is no
+            // "/dashboard" route, so the old redirect landed on a blank page.
             setTimeout(() => {
-                navigate('/dashboard');
+                navigate('/');
             }, 2000);
         } catch (err) {
             const errorMessage = err.response?.data?.detail || 'Failed to create trial. Please try again.';

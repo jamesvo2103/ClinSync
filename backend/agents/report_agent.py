@@ -1,93 +1,124 @@
-from typing import TypedDict
+﻿from typing import TypedDict
 from langgraph.graph import StateGraph
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_core.messages import HumanMessage, SystemMessage, AIMessage
 from models.schema import Volunteer
-from dotenv import load_dotenv
 from langgraph.graph import END
 
-load_dotenv()
-model = ChatGoogleGenerativeAI( 
-    model="gemini-1.5-pro",
+from config import GEMINI_MODEL
+
+model = ChatGoogleGenerativeAI(
+    model=GEMINI_MODEL,
     max_tokens=None,
     timeout=None,
     max_retries=2,
 )
 
+# These prompts describe a medical record. Never invite the model to supply
+# missing details: a fabricated condition or medication reads as fact to the
+# coordinator screening the volunteer.
+NO_FABRICATION = (
+    "Use only the information given. Never invent, infer, or fill in missing "
+    "values. If a field is absent or unclear, write 'not provided'."
+)
+
+MAX_CRITIQUE_ROUNDS = 2
+
+
 class AgentState(TypedDict):
     originalInfo: Volunteer
-    cleanedInfo: Volunteer
+    cleanedInfo: str
+    critique_text: str
     report_text: str
     critique_count: int
     redo_clean: bool
 
 def clean_node(state: AgentState):
-    print("clean_node")
     originalInfo = state.get("originalInfo", "")
+    critique = state.get("critique_text", "")
+
     CLEAN_PROMPT = (
-        "Please clean this list of extracted information from PDF and images. "
-        "Ensure that all information is accurate and complete. "
-        "If you need to add or remove information, please do so."
+        "You normalise volunteer intake data extracted from PDFs and images. "
+        "Reformat it into a clear structured list, correcting only formatting, "
+        "spacing, casing and obvious transcription artefacts. "
+        + NO_FABRICATION
     )
-    USER_PROMPT = (
-        "Clean the following raw data into a structured list format: {info}"
-    )
+    USER_PROMPT = "Clean the following raw data into a structured list format: {info}"
+    if critique:
+        USER_PROMPT += "\n\nA previous attempt drew this critique; address it:\n{critique}"
+
     messages = [
         SystemMessage(CLEAN_PROMPT),
-        HumanMessage(USER_PROMPT.format(info=originalInfo)),
+        HumanMessage(USER_PROMPT.format(info=originalInfo, critique=critique)),
     ]
     response = model.invoke(messages)
-    content = response.content
-    return {"cleanedInfo": content}
+    return {"cleanedInfo": response.content}
 
 
 def critique_node(state: AgentState):
-    print("critique_node")
+    """Judge the cleaned data. Never writes to cleanedInfo.
+
+    The critique is commentary *about* the record, not a replacement for it.
+    Storing it in cleanedInfo (as this node used to on the success path) fed the
+    commentary to report_node in place of the volunteer, which then invented the
+    medical details it could no longer see.
+    """
+    originalInfo = state.get("originalInfo", "")
     cleanedInfo = state.get("cleanedInfo", "")
     critique_count = state.get("critique_count", 0)
 
     CRITIQUE_PROMPT = (
-        "Please critique the following cleaned information. "
-        "If improvements are needed, specify which areas should be redone in the cleaning step. "
-        "If the data is correct, confirm that it is ready for reporting."
+        "You check normalised volunteer intake data against the original. "
+        "Report any value that was altered, dropped, or added relative to the "
+        "original, and any remaining formatting problem. "
+        "Reply with the single word CLEAN on the first line if the data "
+        "faithfully represents the original; otherwise begin with NEEDS WORK "
+        "and list what to redo."
     )
-    USER_PROMPT = "Critique the following cleaned data: {info}"
-    
+    USER_PROMPT = "Original:\n{original}\n\nCleaned:\n{cleaned}"
+
     messages = [
         SystemMessage(CRITIQUE_PROMPT),
-        HumanMessage(USER_PROMPT.format(info=cleanedInfo)),
+        HumanMessage(USER_PROMPT.format(original=originalInfo, cleaned=cleanedInfo)),
     ]
     response = model.invoke(messages)
     content = response.content
 
-    if "needs improvement" in content.lower() or "incorrect" in content.lower():
-        return {"cleanedInfo": cleanedInfo, "critique_count": critique_count + 1, "redo_clean": True}
-    return {"cleanedInfo": content, "critique_count": critique_count + 1, "redo_clean": False}
+    return {
+        "critique_text": content,
+        "critique_count": critique_count + 1,
+        "redo_clean": not content.strip().upper().startswith("CLEAN"),
+    }
 
 
 def report_node(state: AgentState):
-    print("report_node")
     cleanedInfo = state.get("cleanedInfo", "")
+    originalInfo = state.get("originalInfo", "")
+
     REPORT_PROMPT = (
-        "Please generate a report based on the following cleaned information. "
-        "Ensure that all information is accurate and complete. "
-        "If you need to add or remove information, please do so."
+        "You write a concise medical summary of a clinical trial volunteer for "
+        "the coordinator screening them. Cover demographics, medical "
+        "conditions, medications, allergies and past surgeries. "
+        + NO_FABRICATION
+        + " Do not comment on data quality or formatting; describe the volunteer."
     )
     USER_PROMPT = (
-        "Generate a report based on the following cleaned data: {info}"
+        "Write the volunteer summary.\n\n"
+        "Submitted record:\n{original}\n\nNormalised record:\n{cleaned}"
     )
     messages = [
         SystemMessage(REPORT_PROMPT),
-        HumanMessage(USER_PROMPT.format(info=cleanedInfo)),
+        HumanMessage(USER_PROMPT.format(original=originalInfo, cleaned=cleanedInfo)),
     ]
     response = model.invoke(messages)
-    content = response.content
-    return {"report_text": content}
+    return {"report_text": response.content}
+
 
 def should_continue(state: AgentState):
-    print("should_continue")
-    redo_clean = state.get("redo_clean", False) and state.get("critique_count", 0) < 1
-    if redo_clean:
+    # critique_node has already incremented the counter, so compare against the
+    # round limit rather than 0 - the old `< 1` test could never be true and
+    # made this edge dead code.
+    if state.get("redo_clean", False) and state.get("critique_count", 0) < MAX_CRITIQUE_ROUNDS:
         return "clean"
     return "report"
 
@@ -105,28 +136,3 @@ report_graph_agent.add_conditional_edges(
 )
 report_graph_agent.add_edge("report", END)
 
-# # Testing
-# report_graph = report_graph_agent.compile()
-# TEXT = open("test.txt", "r").read()
-# initial_state = {
-#     "originalInfo": Volunteer(
-        # name="John Doe",
-        # email="johndoe@mail.com",
-        # phone="123-456-7890",
-        # dateOfBirth="01/01/2000",  
-        # gender="male",
-        # height="170",
-        # weight="70",
-        # medicalConditions="None",
-        # medications="None",
-        # allergies="None",
-        # pastSurgeries="None",
-        # files=[TEXT]
-#     ),
-#     "cleanedInfo": "",
-#     "report_text": "",
-#     "critique_count": 0,
-#     "redo_clean": False
-# }
-# state = report_graph.invoke(initial_state)
-# print(state["report_text"])

@@ -17,7 +17,8 @@ class Trial(BaseModel):
     compensation: str
     location: str
     eligibilityCriteria: list
-    org_ID: str
+    # Set from the caller's auth token, not from the request body.
+    org_ID: str = ""
 
 class Organization(BaseModel):
     name: str

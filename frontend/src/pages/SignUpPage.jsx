@@ -3,7 +3,7 @@ import { Link } from 'react-router-dom'
 import { useAuthStore } from '../store/useAuthStore'
 
 const SignUpPage = () => {
-    const { signup } = useAuthStore()
+    const { signup, authError, isAuthLoading } = useAuthStore()
     const [error, setError] = useState('')
 
     const [formData, setFormData] = useState({
@@ -22,9 +22,9 @@ const SignUpPage = () => {
         setError('')
     }
 
-    const handleSubmit = (e) => {
+    const handleSubmit = async (e) => {
         e.preventDefault()
-        
+
         // Check if passwords match
         if (formData.password !== formData.confirmPassword) {
             setError('Passwords do not match!')
@@ -40,9 +40,7 @@ const SignUpPage = () => {
         // Create new object without confirmPassword
         const { confirmPassword, ...signupData } = formData
 
-        // If validation passes, proceed with signup
-        console.log(signupData)
-        signup(signupData)
+        await signup(signupData)
     }
 
     return (
@@ -50,9 +48,9 @@ const SignUpPage = () => {
             <div className="card w-full max-w-4xl bg-base-100 shadow-2xl">
                 <div className="card-body p-12">
                     <h2 className="card-title justify-center text-5xl font-bold mb-12">Organization Sign Up</h2>
-                    {error && (
-                        <div className="alert alert-error text-lg mb-6">
-                            {error}
+                    {(error || authError) && (
+                        <div role="alert" className="alert alert-error text-lg mb-6">
+                            {error || authError}
                         </div>
                     )}
                     <form onSubmit={handleSubmit} className="space-y-8">
@@ -109,7 +107,9 @@ const SignUpPage = () => {
                             />
                         </div>
                         <div className="form-control mt-12">
-                            <button type="submit" className="btn btn-primary btn-lg text-xl py-8">Sign Up</button>
+                            <button type="submit" disabled={isAuthLoading} className="btn btn-primary btn-lg text-xl py-8">
+                                {isAuthLoading ? 'Creating account...' : 'Sign Up'}
+                            </button>
                         </div>
                     </form>
                     <p className="text-center mt-8 text-xl">
