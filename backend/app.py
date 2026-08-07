@@ -1,10 +1,30 @@
+import logging
+from contextlib import asynccontextmanager
+
 from fastapi import FastAPI
 import uvicorn
 from api import endpoints
 from config import ALLOWED_ORIGINS
+from db.reset import ensure_index
 from fastapi.middleware.cors import CORSMiddleware
 
-app = FastAPI(title="ClinSync")
+logger = logging.getLogger(__name__)
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    try:
+        indexed = await ensure_index()
+        if indexed:
+            logger.info("Indexed %d trials into the vector store on startup.", indexed)
+    except Exception:
+        # A missing index breaks matching only; auth and trial CRUD still work,
+        # so log loudly and serve rather than taking the whole service down.
+        logger.exception("Could not build the trial index; matching will find nothing.")
+    yield
+
+
+app = FastAPI(title="ClinSync", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
