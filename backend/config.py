@@ -62,3 +62,9 @@ ALLOWED_ORIGINS = [
     for origin in os.getenv("ALLOWED_ORIGINS", DEFAULT_ORIGINS).split(",")
     if origin.strip()
 ]
+
+# Hosts like Vercel mint a fresh origin for every preview deployment, so those
+# cannot be enumerated ahead of time. Set this to a pattern that matches only
+# your own project's deployments; leave it unset to allow nothing beyond the
+# list above. Anchored at both ends so it cannot match a longer hostile host.
+ALLOWED_ORIGIN_REGEX = os.getenv("ALLOWED_ORIGIN_REGEX") or None

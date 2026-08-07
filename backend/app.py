@@ -4,7 +4,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 import uvicorn
 from api import endpoints
-from config import ALLOWED_ORIGINS
+from config import ALLOWED_ORIGINS, ALLOWED_ORIGIN_REGEX
 from db.reset import ensure_index
 from fastapi.middleware.cors import CORSMiddleware
 
@@ -29,6 +29,7 @@ app = FastAPI(title="ClinSync", lifespan=lifespan)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=ALLOWED_ORIGINS,
+    allow_origin_regex=ALLOWED_ORIGIN_REGEX,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
